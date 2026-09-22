@@ -5,6 +5,7 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -72,8 +73,9 @@ type container struct {
 	Names  []string          `json:"Names"`
 	Labels map[string]string `json:"Labels"`
 	Ports  []struct {
-		PublicPort int    `json:"PublicPort"`
-		Type       string `json:"Type"`
+		PrivatePort int    `json:"PrivatePort"`
+		PublicPort  int    `json:"PublicPort"`
+		Type        string `json:"Type"`
 	} `json:"Ports"`
 }
 
@@ -149,6 +151,32 @@ func cards(cs []container) []Card {
 	return out
 }
 
+// internalTargets mapeia id do container -> "<nome>:<porta interna>", o alvo de
+// healthcheck que testa o app direto. Só funciona quando o hub está na mesma
+// rede Docker do container: aí o DNS embutido do Docker resolve o nome e o dial
+// não passa pelo proxy reverso. Fica de fora do Card de propósito — é endereço
+// de rede interna, inalcançável pelo navegador, e o Card vai serializado pro
+// frontend montar o link.
+func internalTargets(cs []container) map[string]string {
+	out := make(map[string]string, len(cs))
+	for _, c := range cs {
+		nome := ""
+		if len(c.Names) > 0 {
+			nome = strings.TrimPrefix(c.Names[0], "/")
+		}
+		porta := 0 // menor porta TCP interna, mesma regra da publicada
+		for _, p := range c.Ports {
+			if p.Type == "tcp" && p.PrivatePort != 0 && (porta == 0 || p.PrivatePort < porta) {
+				porta = p.PrivatePort
+			}
+		}
+		if nome != "" && porta != 0 {
+			out[c.ID] = net.JoinHostPort(nome, strconv.Itoa(porta))
+		}
+	}
+	return out
+}
+
 // target devolve o host:porta a testar, ou "" se o card não tem o que checar.
 func target(c Card) string {
 	if c.URL != "" {
@@ -177,36 +205,58 @@ func target(c Card) string {
 	return ""
 }
 
-// online conecta e ainda espera um instante por EOF: a porta publicada passa
-// pelo docker-proxy, que aceita a conexão mesmo sem ninguém escutando dentro do
-// container e só então a fecha. Só o connect diria "vivo" pra serviço morto.
-// (Sem docker-proxy, o DNAT devolve RST e o próprio connect já falha.)
-func online(addr string) bool {
+// probe conecta num alvo e ainda espera um instante por EOF: a porta publicada
+// passa pelo docker-proxy, que aceita a conexão mesmo sem ninguém escutando
+// dentro do container e só então a fecha. Só o connect diria "vivo" pra serviço
+// morto. (Sem docker-proxy, o DNAT devolve RST e o próprio connect já falha.)
+//
+// resolveu=false só quando o nome sequer resolve, que é como um container numa
+// rede que o hub não enxerga se apresenta.
+func probe(addr string) (vivo, resolveu bool) {
 	conn, err := net.DialTimeout("tcp", addr, dialTimeout)
 	if err != nil {
-		return false
+		var dns *net.DNSError
+		return false, !errors.As(err, &dns)
 	}
 	defer conn.Close()
 	conn.SetReadDeadline(time.Now().Add(eofGrace))
 	_, err = conn.Read(make([]byte, 1))
 	if ne, ok := err.(net.Error); ok && ne.Timeout() {
-		return true // aberta e silenciosa: o normal de quem espera o cliente falar
+		return true, true // aberta e silenciosa: o normal de quem espera o cliente falar
 	}
-	return err == nil // dados = vivo; EOF/RST = não tem ninguém atrás do proxy
+	return err == nil, true // dados = vivo; EOF/RST = não tem ninguém atrás do proxy
+}
+
+// online testa os alvos na ordem dada e para no primeiro que for alcançável.
+// Pular é só pra alvo que não resolve; alvo que resolve e recusa é veredito
+// final. Sem isso, num homelab atrás de proxy reverso o app caído cairia no
+// fallback, encontraria o proxy de pé e voltaria "online".
+func online(addrs ...string) bool {
+	for _, addr := range addrs {
+		if addr == "" {
+			continue
+		}
+		if vivo, resolveu := probe(addr); resolveu {
+			return vivo
+		}
+	}
+	return false
 }
 
 // check preenche Online com um healthcheck por card, todos em paralelo.
-func check(cs []Card) {
+// A rede interna vem primeiro porque testa o app de verdade; a label e a porta
+// publicada são o fallback pra quando o hub não alcança a rede do container.
+func check(cs []Card, interno map[string]string) {
 	var wg sync.WaitGroup
 	for i := range cs {
-		addr := target(cs[i])
-		if addr == "" {
+		addrs := [2]string{interno[cs[i].ID], target(cs[i])}
+		if addrs[0] == "" && addrs[1] == "" {
 			continue
 		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			cs[i].Online = online(addr)
+			cs[i].Online = online(addrs[0], addrs[1])
 		}()
 	}
 	wg.Wait()
@@ -262,7 +312,7 @@ func (h *hub) poll(ctx context.Context, every time.Duration) {
 			st.Error = err.Error()
 		} else {
 			st.Cards = cards(cs)
-			check(st.Cards)
+			check(st.Cards, internalTargets(cs))
 		}
 		b, err := json.Marshal(st)
 		if err != nil {

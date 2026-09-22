@@ -39,7 +39,7 @@ do container e a menor porta TCP publicada.
 |---|---|
 | `dashboard.name` | Nome exibido no card |
 | `dashboard.icon` | Nome do ícone embutido, ex.: `jellyfin` (veja `/icons/`) |
-| `dashboard.url` | URL do link e alvo do healthcheck, no lugar da porta inferida |
+| `dashboard.url` | URL do link clicável, e alvo de healthcheck de reserva |
 | `dashboard.hide=true` | Esconde o container do dashboard |
 
 ```yaml
@@ -58,6 +58,39 @@ services:
 | `HUB_POLL` | `5s` | Intervalo de descoberta e healthcheck |
 | `HUB_ADDR` | `:8080` | Endereço de escuta |
 | `HUB_HOST` | `host.docker.internal` | Host usado no healthcheck das portas publicadas |
+
+## Como o status é checado
+
+TCP puro, tentando os alvos nesta ordem:
+
+1. **Rede Docker interna** — `<nome-do-container>:<porta interna>`, quando o
+   hubizinho está numa rede em comum com o container. Testa o app direto, sem
+   exigir porta publicada nem label nenhuma.
+2. **`dashboard.url`**, quando setado.
+3. **Menor porta TCP publicada**, via `HUB_HOST`.
+
+A regra de quando pular pro próximo alvo é o que dá valor a isso: um alvo que
+**não resolve** (container numa rede que o hubizinho não enxerga) é pulado; um
+alvo que resolve e **recusa a conexão** é resposta final, offline. Sem essa
+distinção, um app caído cairia no alvo seguinte, encontraria o proxy de pé e
+voltaria "online".
+
+### Atrás de proxy reverso (Traefik e afins)
+
+Se o Traefik é o único ponto de entrada e nenhum app publica porta própria, todo
+`dashboard.url` aponta pro mesmo proxy — então checar pela URL responderia só "a
+porta 80 do Traefik está de pé", igual pra todos os cards. Basta pôr o hubizinho
+na mesma rede dos apps pra ele checar cada container direto:
+
+```yaml
+services:
+  hubizinho:
+    networks: [proxy]   # a mesma rede que os apps usam
+```
+
+Sem isso nada quebra: os nomes não resolvem, e o comportamento é o de antes.
+Container em rede isolada, que o hubizinho não alcança, também segue caindo no
+`dashboard.url` normalmente.
 
 ## Coisas que vão te morder
 
@@ -101,8 +134,8 @@ Subset do [dashboard-icons](https://github.com/homarr-labs/dashboard-icons)
 
 Sem secret nenhum pra configurar: o `GITHUB_TOKEN` do runner basta.
 
-**Na primeira publicação o pacote nasce privado**, mesmo com o repo público.
-Uma vez só: página do pacote → *Package settings* → *Change visibility* → Public.
+O pacote herda a visibilidade do repo. Se cair privado, ajuste uma vez em
+*Package settings → Change visibility → Public*.
 
 ## Desenvolvendo
 

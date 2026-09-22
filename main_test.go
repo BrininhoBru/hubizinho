@@ -124,7 +124,7 @@ func TestCheck(t *testing.T) {
 		{Name: "recusada", URL: "http://" + recusa},
 		{Name: "sem porta"},
 	}
-	check(cs)
+	check(cs, nil)
 
 	if !cs[0].Online {
 		t.Error("serviço escutando devia estar online")
@@ -229,5 +229,104 @@ func TestIcons(t *testing.T) {
 		return w.Header().Get("Content-Type")
 	}(); !strings.HasPrefix(ct, "image/svg+xml") {
 		t.Errorf("content-type do svg = %q", ct)
+	}
+}
+
+// Shape de homelab Traefik-only: ninguém publica porta no host e todo card tem
+// dashboard.url apontando pro mesmo proxy.
+const fixtureTraefik = `[
+ {"Id":"e5","Names":["/grafana"],"Labels":{"dashboard.url":"http://grafana.internal"},
+  "Ports":[{"PrivatePort":3000,"Type":"tcp"}]},
+ {"Id":"f6","Names":["/jellyfin"],"Labels":{"dashboard.url":"http://jellyfin.internal"},
+  "Ports":[{"PrivatePort":8920,"Type":"tcp"},{"PrivatePort":8096,"Type":"tcp"},{"PrivatePort":1900,"Type":"udp"}]},
+ {"Id":"g7","Names":["/sem-porta"],"Labels":{},"Ports":[]}
+]`
+
+func TestInternalTargets(t *testing.T) {
+	var cs []container
+	if err := json.Unmarshal([]byte(fixtureTraefik), &cs); err != nil {
+		t.Fatal(err)
+	}
+	got := internalTargets(cs)
+
+	// Porta interna vale mesmo sem nada publicado no host.
+	if got["e5"] != "grafana:3000" {
+		t.Errorf("grafana -> %q", got["e5"])
+	}
+	// Menor porta TCP interna; a UDP não conta.
+	if got["f6"] != "jellyfin:8096" {
+		t.Errorf("jellyfin -> %q", got["f6"])
+	}
+	// Sem porta exposta não há alvo interno.
+	if addr, ok := got["g7"]; ok {
+		t.Errorf("sem-porta não devia ter alvo interno, veio %q", addr)
+	}
+
+	// O alvo interno não pode vazar pro Card, que é o que o frontend recebe.
+	for _, c := range cards(cs) {
+		if strings.Contains(c.URL, ":3000") || strings.Contains(c.URL, ":8096") || c.Port != 0 {
+			t.Errorf("porta interna vazou pro card: %+v", c)
+		}
+	}
+}
+
+func TestCheckRedeInterna(t *testing.T) {
+	defer func(old string) { hubHost = old }(hubHost)
+	hubHost = "127.0.0.1"
+
+	// App de pé: aceita e fica calado.
+	vivo, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vivo.Close()
+	go func() {
+		for {
+			c, err := vivo.Accept()
+			if err != nil {
+				return
+			}
+			defer c.Close()
+		}
+	}()
+
+	// Endereço que resolve mas não tem ninguém: o app caído.
+	caido, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	morto := caido.Addr().String()
+	caido.Close()
+
+	// .invalid nunca resolve (RFC 2606): é como o hub enxerga um container numa
+	// rede Docker que ele não alcança.
+	const foraDeAlcance = "app-em-rede-privada.invalid:8096"
+
+	cs := []Card{
+		// O caso que motivou tudo: app caído na rede interna, proxy de pé na
+		// label. Tem que dar offline, senão o Traefik responde por todo mundo.
+		{ID: "caido", Name: "caido", URL: "http://" + vivo.Addr().String()},
+		// Rede interna responde: nem chega a usar a label.
+		{ID: "vivo", Name: "vivo", URL: "http://" + morto},
+		// Rede que o hub não enxerga: cai pra label sem quebrar.
+		{ID: "isolado", Name: "isolado", URL: "http://" + vivo.Addr().String()},
+		// Sem alvo interno nenhum: comportamento de antes, manda pela label.
+		{ID: "semrede", Name: "semrede", URL: "http://" + vivo.Addr().String()},
+		// Sem interno e sem label: nada a checar.
+		{ID: "nada", Name: "nada"},
+	}
+	check(cs, map[string]string{
+		"caido":   morto,
+		"vivo":    vivo.Addr().String(),
+		"isolado": foraDeAlcance,
+	})
+
+	esperado := map[string]bool{
+		"caido": false, "vivo": true, "isolado": true, "semrede": true, "nada": false,
+	}
+	for _, c := range cs {
+		if c.Online != esperado[c.ID] {
+			t.Errorf("%s: online=%v, esperava %v", c.ID, c.Online, esperado[c.ID])
+		}
 	}
 }

@@ -32,7 +32,7 @@ Pesquisa comparativa de 9 dashboards self-hosted existentes (Homepage, Dashy, Ho
 - [ ] RF-02: Para cada container, extrair labels `dashboard.name`, `dashboard.icon`, `dashboard.url`, `dashboard.hide`.
 - [ ] RF-03: Container sem nenhuma label `dashboard.*` aparece mesmo assim, com nome = nome do container e URL inferida de `http://<docker-host-ip>:<primeira porta exposta>`.
 - [ ] RF-04: Container com `dashboard.hide=true` é excluído da lista (opt-out).
-- [ ] RF-05: Checar status online/offline de cada serviço via TCP connect na porta (exposta ou inferida via label `dashboard.url`), em intervalo curto e configurável.
+- [ ] RF-05: Checar status online/offline de cada serviço via TCP connect, em intervalo curto e configurável, tentando os alvos nesta ordem: (a) `<nome-do-container>:<PrivatePort>` pela rede Docker, quando o dashboard compartilha rede com o container; (b) host/porta de `dashboard.url`; (c) menor porta TCP publicada, via `HUB_HOST`. Alvo que não resolve é pulado; alvo que resolve e recusa conexão encerra a checagem como offline.
 - [ ] RF-06: Expor um endpoint SSE (`/events`) que empurra o estado atual (lista de cards + status) pro navegador sempre que houver mudança (novo container, container sumiu, status mudou).
 - [ ] RF-07: Frontend puro (HTML/CSS/JS vanilla, servido pelo próprio binário Go) consome o SSE e atualiza a grade de cards em tempo real, sem reload de página.
 - [ ] RF-08: Servir um set de ícones vendorizado (embutido na imagem no build via `go:embed`, subset do dashboard-icons) e resolver `dashboard.icon=nome` para o arquivo local correspondente; sem ícone = fallback visual simples (sem CDN externo).
@@ -50,6 +50,8 @@ Pesquisa comparativa de 9 dashboards self-hosted existentes (Homepage, Dashy, Ho
 | Container sem nenhuma porta exposta e sem `dashboard.url` | Aparece na lista sem link clicável (card "não navegável", só informativo) |
 | `dashboard.icon` referencia ícone que não existe no set vendorizado | Cai no fallback visual (ex: inicial do nome) |
 | Múltiplas portas expostas, sem label indicando qual usar | Usa a primeira porta TCP exposta (menor número) como padrão |
+| Container em rede Docker que o dashboard não alcança | O nome não resolve; cai pro alvo seguinte (`dashboard.url` ou porta publicada) sem marcar offline |
+| App caído em container que segue rodando, atrás de proxy reverso de pé | Offline — a checagem para no alvo de rede interna e não consulta o proxy |
 
 ## 5. Requisitos Não-Funcionais
 
@@ -62,7 +64,8 @@ Pesquisa comparativa de 9 dashboards self-hosted existentes (Homepage, Dashy, Ho
 
 - Backend em Go, usando a lib oficial `docker/docker/client` pra falar com o socket.
 - Loop de discovery: a cada N segundos, lista containers via `ContainerList`, extrai labels, monta a lista de "cards" em memória (sem persistência).
-- Loop de healthcheck: TCP dial concorrente (goroutines) pra cada card com porta conhecida, timeout curto (ex: 1-2s), resultado guardado junto do card.
+- Loop de healthcheck: TCP dial concorrente (goroutines) pra cada card com alvo conhecido, timeout curto (ex: 1-2s), resultado guardado junto do card.
+- Alvo de rede interna (`nome:PrivatePort`) calculado a partir da lista bruta de containers e mantido num map `id -> alvo`, usado só no healthcheck: é endereço inalcançável pelo navegador e por isso nunca entra no `Card` serializado pro frontend.
 - Quando o estado (lista de cards + status) muda em relação ao ciclo anterior, o servidor publica o novo estado pros clientes conectados via SSE (`text/event-stream`).
 - Frontend: página HTML única servida em `/`, JS vanilla conecta em `/events` via `EventSource`, re-renderiza a grade de cards no DOM a cada evento recebido.
 - Ícones: pasta `icons/` embutida na imagem via `go:embed`, mapeamento nome→arquivo (subset curado do dashboard-icons, licença permissiva verificada no build).
@@ -94,7 +97,7 @@ Pesquisa comparativa de 9 dashboards self-hosted existentes (Homepage, Dashy, Ho
 - Autenticação/login.
 - Persistência de preferências do usuário (ordenação manual, ocultar via UI).
 - Outros tipos de card além de containers Docker (links manuais, systemd, etc.).
-- Health-check HTTP configurável (fica só TCP connect nesta v1).
+- Health-check HTTP configurável, com Host header por card (fica só TCP connect nesta v1).
 
 ## 8. Dependências e Riscos
 
