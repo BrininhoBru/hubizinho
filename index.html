@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hubizinho</title>
+<style>
+:root {
+  --bg:#15171c; --card:#1e2128; --fg:#e6e8ec; --dim:#8a91a0;
+  --on:#3fb950; --off:#4a4f5a; --line:#2a2e37;
+}
+@media (prefers-color-scheme: light) {
+  :root { --bg:#f4f5f7; --card:#fff; --fg:#1b1e24; --dim:#6b7280; --off:#c3c8d0; --line:#e3e6ea; }
+}
+* { box-sizing:border-box; }
+body { margin:0; padding:24px; background:var(--bg); color:var(--fg);
+  font:16px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+header { display:flex; align-items:baseline; gap:12px; margin-bottom:20px; }
+h1 { font-size:20px; margin:0; font-weight:600; }
+#status { color:var(--dim); font-size:13px; }
+#erro { display:none; background:#5c1f1f; color:#fff; border:1px solid #7f2b2b;
+  padding:12px 14px; border-radius:8px; margin-bottom:16px; font-size:14px; }
+#grade { display:grid; gap:14px; grid-template-columns:repeat(auto-fill, minmax(180px, 1fr)); }
+.card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px;
+  text-decoration:none; color:inherit; display:block; position:relative; }
+a.card:hover { border-color:var(--dim); }
+.card.offline { opacity:.5; }
+.dot { position:absolute; top:14px; right:14px; width:8px; height:8px;
+  border-radius:50%; background:var(--off); }
+.card.online .dot { background:var(--on); }
+.icone, .inicial { width:40px; height:40px; margin-bottom:12px; display:block; }
+.inicial { border-radius:8px; background:var(--line); color:var(--dim);
+  display:flex; align-items:center; justify-content:center; font-size:20px; font-weight:600; }
+.nome { font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.porta { color:var(--dim); font-size:13px; margin-top:2px; }
+</style>
+</head>
+<body>
+<header><h1>hubizinho</h1><span id="status">conectando…</span></header>
+<div id="erro"></div>
+<div id="grade"></div>
+<script>
+const grade = document.getElementById('grade');
+const status = document.getElementById('status');
+const erro = document.getElementById('erro');
+
+// O backend manda só a porta quando infere: o navegador já sabe por qual host
+// chegou até aqui, então não precisa de HOST_IP configurado.
+function alvo(c) {
+  if (c.url) return c.url;
+  if (c.port) return `http://${location.hostname}:${c.port}`;
+  return null;
+}
+
+function elemento(c) {
+  const href = alvo(c);
+  const el = document.createElement(href ? 'a' : 'div');
+  if (href) {
+    el.href = href;
+    el.target = '_blank';
+    el.rel = 'noopener';
+    // Sem porta nem URL não há o que checar: card informativo fica sem bolinha.
+    el.appendChild(document.createElement('span')).className = 'dot';
+  }
+  el.className = 'card' + (href ? (c.online ? ' online' : ' offline') : '');
+
+  const inicial = document.createElement('div');
+  inicial.className = 'inicial';
+  inicial.textContent = (c.name[0] || '?').toUpperCase();
+  if (c.icon) {
+    const img = document.createElement('img');
+    img.className = 'icone';
+    img.src = `/icons/${encodeURIComponent(c.icon)}.svg`;
+    img.alt = '';
+    img.onerror = () => img.replaceWith(inicial); // ícone fora do set: cai na inicial
+    el.appendChild(img);
+  } else {
+    el.appendChild(inicial);
+  }
+
+  const nome = document.createElement('div');
+  nome.className = 'nome';
+  nome.textContent = c.name;
+  nome.title = c.name;
+  el.appendChild(nome);
+
+  if (c.port) {
+    const porta = document.createElement('div');
+    porta.className = 'porta';
+    porta.textContent = ':' + c.port;
+    el.appendChild(porta);
+  }
+  return el;
+}
+
+const es = new EventSource('/events');
+es.onmessage = e => {
+  const st = JSON.parse(e.data);
+  erro.textContent = st.error ? 'Erro lendo o Docker: ' + st.error : '';
+  erro.style.display = st.error ? 'block' : 'none';
+  grade.replaceChildren(...st.cards.map(elemento));
+  status.textContent = st.cards.length + (st.cards.length === 1 ? ' container' : ' containers');
+};
+es.onerror = () => status.textContent = 'reconectando…';
+</script>
+</body>
+</html>

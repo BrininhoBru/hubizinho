@@ -1,0 +1,21 @@
+services:
+  hubizinho:
+    build: .
+    container_name: hubizinho
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      # Somente leitura: o dashboard só lista containers, nunca controla.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    extra_hosts:
+      # Como os healthchecks batem nas portas publicadas no host, o container
+      # precisa saber chegar até ele. Sem isso, tudo aparece offline.
+      - "host.docker.internal:host-gateway"
+    labels:
+      # O próprio dashboard não precisa de card. Troque por dashboard.name se quiser.
+      dashboard.hide: "true"
+    # environment:
+    #   HUB_POLL: 5s        # intervalo de descoberta + healthcheck
+    #   HUB_ADDR: ":8080"   # porta interna
+    #   HUB_HOST: host.docker.internal

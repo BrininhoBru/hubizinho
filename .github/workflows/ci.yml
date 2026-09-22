@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: false # não há dependências pra cachear
+
+      - run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - run: go vet ./...
+      - run: go test ./...
+
+      # Os testes acima não provam que a imagem scratch sobe. Esta parte prova:
+      # o runner já tem Docker e o socket, que é tudo que o app precisa.
+      - name: imagem sobe e responde
+        run: |
+          docker build -t hubizinho .
+          docker run -d --name smoke -p 8080:8080 \
+            -v /var/run/docker.sock:/var/run/docker.sock:ro hubizinho
+          for _ in $(seq 20); do
+            curl -sf localhost:8080/ >/dev/null && break || sleep 1
+          done
+          curl -fsS localhost:8080/ | grep -q "EventSource"
+          curl -fsS localhost:8080/icons/jellyfin.svg >/dev/null
+          # Lê o stream por 5s e exige ao menos um evento. Gasta a janela inteira:
+          # o stream fica aberto e calado até algo mudar, então não fecha sozinho.
+          timeout 5 curl -sN localhost:8080/events | grep -qm1 "^data:"
+          docker logs smoke
+
+  image:
+    needs: test
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern=v{{version}}
+            type=sha,format=short
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
